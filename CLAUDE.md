@@ -13,8 +13,8 @@ Gemini API, Cloudflare sponsor prize.
 | Owner | Branch | Files |
 | --- | --- | --- |
 | Lu | `data` | `data.py`, `i4_data.py`, `data/`, `worker/` (Cloudflare) |
-| Teammate | `ai` | `ai.py`, `rules.py` |
-| Teammate | `ui` | `app.py` |
+| Liz | `ai` | `ai.py`, `rules.py` |
+| Gowri | `ui` | `app.py` |
 
 If a change is needed in someone else's file, stop and tell me instead of editing it.
 
