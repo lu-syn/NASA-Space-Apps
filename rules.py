@@ -55,14 +55,20 @@ def signal_statuses(row, baseline, history):
 
     `history` = all rows up to and including `row` (needed for the 'for 2+ days' rules).
     """
+    def latest(col):
+        """Most recent value that exists (blood and daily-check cells are empty on most hourly rows)."""
+        vals = history[col].dropna()
+        return vals.iloc[-1] if len(vals) else float("nan")
+
     out = {
         "dose_rate": _ratio(row["dose_rate"], baseline["dose_rate"], 3, 10),
         "mission_dose": _limit(row["total_dose"] / MISSION_DOSE_BUDGET, 0.5, 0.8),
         "heart_rate": _ratio(row["heart_rate"], baseline["heart_rate"], 1.15, 1.30),
-        "crp": _ratio(row["crp"], baseline["crp"], 2, 5),
-        "glucose": _limit(row["glucose"], 100, 126),
-        "reaction": _ratio(row["reaction_ms"], baseline["reaction_ms"], 1.15, 1.30),
+        "crp": _ratio(latest("crp"), baseline["crp"], 2, 5),
+        "glucose": _limit(latest("glucose"), 100, 126),
+        "reaction": _ratio(latest("reaction_ms"), baseline["reaction_ms"], 1.15, 1.30),
     }
+
 
     # Cortisol: the last 2 blood draws both high (draws are every 1-2 days).
     cort = history["cortisol"].dropna() / baseline["cortisol"]
