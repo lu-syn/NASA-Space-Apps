@@ -63,9 +63,11 @@ cortisol µg/dL, glucose mg/dL, reaction_ms milliseconds, mood 1-5.
   rising to 10-30x baseline, then back to baseline. total_dose is the running sum.
 - Heart rate: resting ~65 bpm with noise; +15-25% during and a few hours after the flare.
 - Blood draws at 08:00 on days 1, 2, 4, 5, 7 (other rows empty):
-  - CRP: baseline ~1 mg/L; ~5-8x baseline about 24 h after the flare, then decays.
+  - CRP: baseline ~1 mg/L; ~2.5x baseline about 24 h after the flare, then decays
+    (matches the mild post-flight CRP rise seen in real Inspiration4 crew, OSD-575).
   - Cortisol: baseline ~12 µg/dL; ~1.5-2x on days 4-5.
-  - Glucose: ~90 mg/dL fasting; mild rise to ~105 on days 4-5.
+  - Glucose: baseline ~75 mg/dL fasting (Inspiration4 pre-flight mean, OSD-575;
+    falls back to 90 if data/i4_blood.csv is missing); ~+17% on days 4-5.
 - Daily check at 09:00 each day: reaction_ms baseline ~300, 20-35% slower on days 4-5;
   mood 4 baseline, dropping to 2 on days 4-5, recovering by day 7.
 - Days 1-3 before the flare are the baseline period for alert rules.

@@ -36,16 +36,27 @@ FLARE_DOSE_MULT = {10: 10, 11: 16, 12: 22, 13: 28, 14: 22, 15: 15, 16: 10}
 FLARE_HR_BOOST = {10: 0.18, 11: 0.20, 12: 0.22, 13: 0.25, 14: 0.24, 15: 0.22,
                   16: 0.21, 17: 0.20, 18: 0.18, 19: 0.16, 20: 0.15}
 
-# Blood draws at 08:00. Day 4's draw is ~19-24 h after the flare, so the
-# inflammation marker (CRP) peaks there, then decays.
+# Blood baselines. Glucose is replaced by the real Inspiration4 pre-flight
+# mean when data/i4_blood.csv exists (see _glucose_baseline below).
+BASE_CRP = 1.0              # mg/L (kept simulated: real crew CRP varies 1-76 mg/L)
+BASE_CORTISOL = 12.0        # µg/dL (not in OSD-575, so always simulated)
+DEFAULT_BASE_GLUCOSE = 90.0  # mg/dL, fallback if the real file is missing
+I4_PATH = Path(__file__).parent / "data" / "i4_blood.csv"
+
+# Blood draws at 08:00, as multiples of each baseline. Day 4's draw is
+# ~19-24 h after the flare, so the inflammation marker (CRP) peaks there.
+# CRP peaks at only ~2.5x (not the 5-8x we first planned) because that is
+# what real crew showed: Inspiration4 CRP right after landing (R+1) was
+# ~0.8-2x each person's own pre-flight (L-3) value (data/i4_blood.csv,
+# crp_fold_change). A milder rise keeps the demo honest to real data.
 BLOOD_HOUR = 8
 BLOOD_PANEL = {
-    #    day: (crp mg/L, cortisol µg/dL, glucose mg/dL)
-    1: (1.0, 12.0, 90.0),
-    2: (1.1, 12.5, 91.0),
-    4: (7.0, 22.0, 105.0),
-    5: (4.5, 20.0, 104.0),
-    7: (1.6, 13.0, 92.0),
+    #    day: (crp x, cortisol x, glucose x)
+    1: (1.0, 1.00, 1.00),
+    2: (1.1, 1.04, 1.01),
+    4: (2.5, 1.83, 1.17),
+    5: (1.8, 1.67, 1.16),
+    7: (1.2, 1.08, 1.02),
 }
 
 # Daily mood + cognitive check at 09:00.
@@ -76,15 +87,34 @@ def _heart_rate(day, hour, rng):
     return round(value)
 
 
-def _blood_panel(day, hour, rng):
+def load_i4_reference() -> pd.DataFrame:
+    # Hook: real Inspiration4 blood values (OSD-575) for the dashboard to compare.
+    # Caveats: 4 crew, draws only before/after flight (never during), a 3-day
+    # mission, and big differences between people. Empty table if file missing.
+    if not I4_PATH.exists():
+        return pd.DataFrame()
+    return pd.read_csv(I4_PATH)
+
+
+def _glucose_baseline():
+    # Hook: crew's real pre-flight glucose mean, or 90 mg/dL if no file.
+    ref = load_i4_reference()
+    if ref.empty:
+        return DEFAULT_BASE_GLUCOSE
+    # Pre-flight = before launch; skip any values flagged as suspect.
+    preflight = ref[(ref["days_from_launch"] < 0) & ref["flag"].isna()]
+    return float(preflight["glucose"].mean())
+
+
+def _blood_panel(day, hour, rng, base_glucose):
     # Hook: blood values only at 08:00 on draw days; empty (NaN) otherwise.
     if hour != BLOOD_HOUR or day not in BLOOD_PANEL:
         return np.nan, np.nan, np.nan
-    crp, cortisol, glucose = BLOOD_PANEL[day]
+    crp_x, cortisol_x, glucose_x = BLOOD_PANEL[day]
     # Small noise so values look measured, not typed in.
-    crp = round(crp * (1 + rng.normal(0, 0.05)), 2)
-    cortisol = round(cortisol * (1 + rng.normal(0, 0.03)), 1)
-    glucose = round(glucose + rng.normal(0, 1.5))
+    crp = round(BASE_CRP * crp_x * (1 + rng.normal(0, 0.05)), 2)
+    cortisol = round(BASE_CORTISOL * cortisol_x * (1 + rng.normal(0, 0.03)), 1)
+    glucose = round(base_glucose * glucose_x + rng.normal(0, 1.5))
     return crp, cortisol, glucose
 
 
@@ -100,10 +130,11 @@ def _daily_check(day, hour, rng):
 def generate_mission(seed=42):
     # Hook: 7 days x 24 hours = 168 simulated readings, same every run (seed).
     rng = np.random.default_rng(seed)  # fixed seed -> repeatable demo
+    base_glucose = _glucose_baseline()  # read once, not for every hour
     rows = []
     for i in range(MISSION_DAYS * 24):
         day, hour = i // 24 + 1, i % 24  # day is 1-based to match the scenario
-        crp, cortisol, glucose = _blood_panel(day, hour, rng)
+        crp, cortisol, glucose = _blood_panel(day, hour, rng, base_glucose)
         reaction_ms, mood = _daily_check(day, hour, rng)
         rows.append({
             "timestamp": MISSION_START + pd.Timedelta(hours=i),
@@ -213,6 +244,11 @@ def _print_summary(df):
     print(f"Total dose      : {df['total_dose'].iloc[-1]} mGy")
     print(f"Blood draws     : {df['crp'].notna().sum()}")
     print(f"Daily checks    : {df['mood'].notna().sum()}")
+    source = "Inspiration4 pre-flight mean" if I4_PATH.exists() else "default"
+    print(f"Glucose baseline: {_glucose_baseline():.1f} mg/dL ({source})")
+    print("\nBlood draws:")
+    draws = df.dropna(subset=["crp"])[["timestamp", "crp", "cortisol", "glucose"]]
+    print(draws.to_string(index=False))
 
 
 if __name__ == "__main__":
