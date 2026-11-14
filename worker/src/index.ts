@@ -12,7 +12,11 @@ const COLUMNS = [
 ] as const;
 const NUMBER_COLUMNS = COLUMNS.slice(1);
 
-type Reading = Record<(typeof COLUMNS)[number], string | number | null>;
+// Extra ground-side column: alert color from rules.py on the ship (optional).
+const STATUS_VALUES = ["green", "yellow", "red"];
+const DB_COLUMNS = [...COLUMNS, "status"] as const;
+
+type Reading = Record<(typeof DB_COLUMNS)[number], string | number | null>;
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -56,20 +60,20 @@ async function saveReading(request: Request, env: Env): Promise<Response> {
   if (typeof result === "string") return json({ error: result }, 400);
 
   // INSERT OR REPLACE: if the ship retries a sync, we don't get duplicates.
-  const placeholders = COLUMNS.map(() => "?").join(", ");
+  const placeholders = DB_COLUMNS.map(() => "?").join(", ");
   await env.DB.prepare(
-    `INSERT OR REPLACE INTO readings (${COLUMNS.join(", ")}) VALUES (${placeholders})`,
+    `INSERT OR REPLACE INTO readings (${DB_COLUMNS.join(", ")}) VALUES (${placeholders})`,
   )
-    .bind(...COLUMNS.map((col) => result[col]))
+    .bind(...DB_COLUMNS.map((col) => result[col]))
     .run();
 
   return json({ ok: true, timestamp: result.timestamp }, 201);
 }
 
 async function listReadings(env: Env): Promise<Response> {
-  // Hook: every stored reading, oldest first (like load_mission()).
+  // Hook: every stored reading, oldest first (like load_mission()), plus status.
   const { results } = await env.DB.prepare(
-    `SELECT ${COLUMNS.join(", ")} FROM readings ORDER BY timestamp`,
+    `SELECT ${DB_COLUMNS.join(", ")} FROM readings ORDER BY timestamp`,
   ).all();
   return json(results);
 }
@@ -97,6 +101,16 @@ function parseReading(body: unknown): Reading | string {
     } else {
       return `${col} must be a number or null`;
     }
+  }
+
+  // status is optional; if given it must be one of the three colors.
+  const status = input.status;
+  if (status === undefined || status === null) {
+    row.status = null;
+  } else if (typeof status === "string" && STATUS_VALUES.includes(status)) {
+    row.status = status;
+  } else {
+    return `status must be one of ${STATUS_VALUES.join(", ")} (or null)`;
   }
   return row;
 }
