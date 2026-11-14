@@ -218,3 +218,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local mission database (rebuilt by `python data.py`)
+mission.db

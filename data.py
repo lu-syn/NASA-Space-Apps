@@ -4,6 +4,10 @@ Everything here is SIMULATED demo data, not clinical data. It stands in for
 the real dosimeter, heart-rate sensor, SERS blood panel and daily check.
 """
 
+import sqlite3
+from contextlib import closing
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 
@@ -116,6 +120,105 @@ def generate_mission(seed=42):
     # Each reading covers 1 hour, so µGy/h x 1 h = µGy; /1000 converts to mGy.
     df["total_dose"] = (df["dose_rate"].cumsum() / 1000).round(3)
     # "Int64" keeps whole numbers while still allowing empty cells.
-    for col in ["heart_rate", "glucose", "reaction_ms", "mood"]:
+    for col in INT_COLUMNS:
         df[col] = df[col].astype("Int64")
     return df[COLUMNS].sort_values("timestamp").reset_index(drop=True)
+
+
+# ---------------------------------------------------------------------------
+# SQLite storage (mission.db). The spacecraft keeps its own copy first, so the
+# dashboard works even with no link to Earth; Cloudflare sync comes later.
+# ---------------------------------------------------------------------------
+
+# Next to this file, so it works no matter which folder you run from.
+DB_PATH = Path(__file__).parent / "mission.db"
+
+# Whole-number columns (pandas "Int64" allows empty cells).
+INT_COLUMNS = ["heart_rate", "glucose", "reaction_ms", "mood"]
+
+# timestamp is UNIQUE so saving the same hour twice replaces it instead of
+# making a duplicate (lets you re-run __main__ safely).
+# synced = 0/1 is for the later sync_to_ground step: 0 means "not sent yet".
+CREATE_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS readings (
+    timestamp   TEXT PRIMARY KEY,
+    dose_rate   REAL,
+    total_dose  REAL,
+    heart_rate  INTEGER,
+    crp         REAL,
+    cortisol    REAL,
+    glucose     INTEGER,
+    reaction_ms INTEGER,
+    mood        INTEGER,
+    synced      INTEGER NOT NULL DEFAULT 0
+)
+"""
+
+
+def _connect():
+    # Hook: open mission.db and make sure the table exists.
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(CREATE_TABLE_SQL)
+    return conn
+
+
+def _to_sql_value(value):
+    # Hook: turn pandas/numpy values into plain Python values SQLite accepts.
+    if value is None or pd.isna(value):
+        return None  # empty cell -> NULL
+    if isinstance(value, pd.Timestamp):
+        return value.strftime("%Y-%m-%d %H:%M:%S")  # text sorts in time order
+    if isinstance(value, np.generic):
+        return value.item()  # numpy number -> normal int/float
+    return value
+
+
+def save_reading(row: dict) -> None:
+    # Hook: one reading in -> one row in mission.db (same timestamp = replace).
+    timestamp = pd.Timestamp(row["timestamp"])  # accept a string or Timestamp
+    values = [_to_sql_value(timestamp)]
+    values += [_to_sql_value(row.get(col)) for col in COLUMNS[1:]]
+    placeholders = ", ".join("?" for _ in COLUMNS)
+    sql = (f"INSERT OR REPLACE INTO readings ({', '.join(COLUMNS)}) "
+           f"VALUES ({placeholders})")
+    with closing(_connect()) as conn:
+        with conn:  # commits on success, rolls back on error
+            conn.execute(sql, values)
+
+
+def load_mission() -> pd.DataFrame:
+    # Hook: everything in mission.db -> DataFrame, oldest reading first.
+    with closing(_connect()) as conn:
+        df = pd.read_sql_query(
+            f"SELECT {', '.join(COLUMNS)} FROM readings ORDER BY timestamp", conn
+        )
+    # SQLite gives back text and plain numbers; restore the same types that
+    # generate_mission() produces so the rest of the app sees one format.
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    for col in COLUMNS[1:]:
+        df[col] = pd.to_numeric(df[col])
+    for col in INT_COLUMNS:
+        df[col] = df[col].astype("Int64")
+    return df
+
+
+def _print_summary(df):
+    # Hook: a quick sanity check you can read in the terminal.
+    peak = df.loc[df["dose_rate"].idxmax()]
+    print(f"Readings stored : {len(df)}")
+    print(f"From            : {df['timestamp'].min()}")
+    print(f"To              : {df['timestamp'].max()}")
+    # "uGy/h" not "µGy/h": some Windows terminals can't print the µ sign.
+    print(f"Peak dose rate  : {peak['dose_rate']} uGy/h at {peak['timestamp']}")
+    print(f"Total dose      : {df['total_dose'].iloc[-1]} mGy")
+    print(f"Blood draws     : {df['crp'].notna().sum()}")
+    print(f"Daily checks    : {df['mood'].notna().sum()}")
+
+
+if __name__ == "__main__":
+    # Run `python data.py` to (re)build mission.db from the simulated mission.
+    mission = generate_mission()
+    for record in mission.to_dict("records"):
+        save_reading(record)
+    print(f"Saved simulated mission to {DB_PATH.name}\n")
+    _print_summary(load_mission())
