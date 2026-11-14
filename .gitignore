@@ -221,3 +221,4 @@ __marimo__/
 
 # Local mission database (rebuilt by `python data.py`)
 mission.db
+data/raw/
