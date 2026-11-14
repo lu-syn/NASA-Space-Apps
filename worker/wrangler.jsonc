@@ -1,0 +1,20 @@
+// Cloudflare Worker config for the ground station.
+// Secrets (SYNC_KEY) are NOT in this file: locally they live in .dev.vars,
+// in production they are set with `npx wrangler secret put SYNC_KEY`.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "astro-worker",
+  "main": "src/index.ts",
+  // Fixes which Workers runtime behavior we get, so updates can't surprise us.
+  "compatibility_date": "2026-10-01",
+  "observability": { "enabled": true },
+  "d1_databases": [
+    {
+      // In code this database is `env.DB`.
+      "binding": "DB",
+      "database_name": "astro-db",
+      "database_id": "e5a02abb-d500-430b-81fc-4c9da1358e23",
+      "migrations_dir": "migrations"
+    }
+  ]
+}

@@ -4,12 +4,18 @@ Everything here is SIMULATED demo data, not clinical data. It stands in for
 the real dosimeter, heart-rate sensor, SERS blood panel and daily check.
 """
 
+import json
+import os
 import sqlite3
+import time
+import urllib.error
+import urllib.request
 from contextlib import closing
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from dotenv import load_dotenv
 
 # Shared row format (other files depend on this exact order; don't rename).
 COLUMNS = [
@@ -251,10 +257,128 @@ def _print_summary(df):
     print(draws.to_string(index=False))
 
 
+# ---------------------------------------------------------------------------
+# Sync to ground (Cloudflare Worker). The ship stores everything locally first;
+# this sends what Earth hasn't seen yet. A failed link must never crash the app.
+# ---------------------------------------------------------------------------
+
+# Default pause before sending. Real Earth-Mars delay is ~4-24 minutes one way;
+# 5 seconds keeps the demo quick while still showing that a delay exists.
+DEFAULT_SYNC_DELAY = 5
+HTTP_TIMEOUT = 10  # seconds per request, so a dead link can't hang the app
+# Fallback rule (only if rules.py is missing): red at 10x baseline dose rate.
+FALLBACK_RED_DOSE = 10 * BASE_DOSE_RATE
+
+
+def _statuses(df):
+    # Hook: green/yellow/red for every row, from rules.py if we have it.
+    try:
+        import rules  # Liz's alert rules (ai branch, merged into main)
+        baseline = rules.get_baseline(df)
+        # history = all rows up to this one, because some rules look back in time.
+        statuses = [rules.status_for(df.iloc[i], baseline, df.iloc[: i + 1])
+                    for i in range(len(df))]
+        return statuses, "rules.py status_for"
+    except ImportError:
+        statuses = ["red" if rate >= FALLBACK_RED_DOSE else "green"
+                    for rate in df["dose_rate"]]
+        return statuses, "fallback (red if dose_rate >= 10x baseline)"
+
+
+def _unsynced_timestamps():
+    # Hook: which readings has Earth not received yet? (synced = 0)
+    with closing(_connect()) as conn:
+        rows = conn.execute(
+            "SELECT timestamp FROM readings WHERE synced = 0 ORDER BY timestamp"
+        ).fetchall()
+    return {row[0] for row in rows}
+
+
+def _mark_synced(timestamp):
+    # Hook: Earth confirmed this reading -> never send it again.
+    with closing(_connect()) as conn:
+        with conn:
+            conn.execute("UPDATE readings SET synced = 1 WHERE timestamp = ?",
+                         (timestamp,))
+
+
+def _post_reading(url, key, payload):
+    # Hook: one reading -> one POST to the Worker. Raises if it didn't arrive.
+    request = urllib.request.Request(
+        f"{url.rstrip('/')}/readings",
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "X-Sync-Key": key,
+            # Some sites block urllib's default user agent, so name ourselves.
+            "User-Agent": "astro-monitor-sync/1.0",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT):
+        pass  # any 2xx is success; errors raise HTTPError / URLError
+
+
+def sync_to_ground(delay_seconds=DEFAULT_SYNC_DELAY) -> int:
+    # Hook: wait (comm delay), POST every unsynced row, mark each one synced.
+    # Returns how many rows reached Earth. Never raises on network trouble.
+    load_dotenv()
+    url, key = os.getenv("WORKER_URL"), os.getenv("SYNC_KEY")
+    if not url or not key:
+        print("WARNING: WORKER_URL or SYNC_KEY missing in .env - sync skipped.")
+        return 0
+
+    df = load_mission()
+    waiting = _unsynced_timestamps()
+    if not waiting:
+        print("Nothing to sync - Earth is up to date.")
+        return 0
+
+    # Status uses the WHOLE mission (baseline = first 3 days), not just new rows.
+    statuses, source = _statuses(df)
+    print(f"{len(waiting)} readings waiting. Status from: {source}")
+    print(f"Simulating Earth communication delay: {delay_seconds} s ...")
+    time.sleep(delay_seconds)
+
+    sent = 0
+    for (_, row), status in zip(df.iterrows(), statuses):
+        payload = {col: _to_sql_value(row[col]) for col in COLUMNS}
+        if payload["timestamp"] not in waiting:
+            continue
+        payload["status"] = status
+        try:
+            _post_reading(url, key, payload)
+        except urllib.error.HTTPError as err:
+            if err.code == 400:
+                # Bad data won't fix itself by retrying: skip it, keep going.
+                print(f"WARNING: Worker rejected {payload['timestamp']} "
+                      f"(400: {err.read().decode(errors='replace')}). Skipped.")
+                continue
+            # 401 (wrong key), 5xx, etc.: stop now; unsent rows retry next time.
+            print(f"WARNING: Worker error {err.code} - stopping, will retry later.")
+            break
+        except (urllib.error.URLError, TimeoutError, OSError) as err:
+            print(f"WARNING: can't reach Worker ({err}) - will retry later.")
+            break
+        _mark_synced(payload["timestamp"])  # only after Earth confirmed it
+        sent += 1
+
+    left = len(_unsynced_timestamps())
+    print(f"Synced {sent} readings to ground. Still waiting: {left}.")
+    return sent
+
+
 if __name__ == "__main__":
-    # Run `python data.py` to (re)build mission.db from the simulated mission.
-    mission = generate_mission()
-    for record in mission.to_dict("records"):
-        save_reading(record)
-    print(f"Saved simulated mission to {DB_PATH.name}\n")
-    _print_summary(load_mission())
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "sync":
+        # `python data.py sync`      -> send unsynced readings (5 s delay)
+        # `python data.py sync 0`    -> same, no delay
+        delay = float(sys.argv[2]) if len(sys.argv) > 2 else DEFAULT_SYNC_DELAY
+        sync_to_ground(delay)
+    else:
+        # `python data.py` -> (re)build mission.db from the simulated mission.
+        mission = generate_mission()
+        for record in mission.to_dict("records"):
+            save_reading(record)
+        print(f"Saved simulated mission to {DB_PATH.name}\n")
+        _print_summary(load_mission())
