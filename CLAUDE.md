@@ -12,9 +12,9 @@ Gemini API, Cloudflare sponsor prize.
 ## Team and file ownership (do not edit files you don't own)
 | Owner | Branch | Files |
 | --- | --- | --- |
-| Lu | `data` | `data.py`, `worker/` (Cloudflare) |
-| Gowri | `ai` | `ai.py`, `rules.py` |
-| Liz | `ui` | `app.py` |
+| Lu | `data` | `data.py`, `i4_data.py`, `data/`, `worker/` (Cloudflare) |
+| Teammate | `ai` | `ai.py`, `rules.py` |
+| Teammate | `ui` | `app.py` |
 
 If a change is needed in someone else's file, stop and tell me instead of editing it.
 
@@ -35,10 +35,25 @@ cortisol µg/dL, glucose mg/dL, reaction_ms milliseconds, mood 1-5.
 2. `data.py`: SQLite storage in `mission.db` — create table, `save_reading`, `load_mission`.
    Add a `__main__` block that generates the mission, saves it, and prints a summary.
 3. Push, open a PR into `main`, so teammates can use real-looking data.
-4. `worker/`: Cloudflare Worker + D1 database `astro-db` with
+4. Real NASA data from OSD-575 (Inspiration4 crew blood). HARD LIMIT: 2 hours.
+   - Lu downloads the processed CSV files (metabolic panel with glucose; cytokine panel
+     with CRP) from the OSD-575 page into `data/raw/` by hand. Do NOT call the OSDR API
+     at runtime; the demo must work offline.
+   - `i4_data.py`: read those files and write one small clean file
+     `data/i4_blood.csv` with columns `crew_id,timepoint,days_from_launch,glucose,crp`
+     (add `cortisol` only if it exists in the files; do not invent it).
+     First print the raw column names and units so we can map them correctly together.
+   - `data.py`: `generate_mission()` sets the glucose and CRP baselines from the crew's
+     pre-flight average in `data/i4_blood.csv` (fall back to the defaults below if the
+     file is missing).
+   - `load_i4_reference() -> DataFrame` returns the clean file so the dashboard can show
+     real Inspiration4 values next to the simulated mission.
+   - Caveats to keep in comments: 4 crew, draws before and after flight (not during),
+     3-day mission, large individual differences.
+5. `worker/`: Cloudflare Worker + D1 database `astro-db` with
    `POST /readings` (insert one row) and `GET /readings` (return all rows as JSON).
    Require a shared secret header `X-Sync-Key`; reject requests without it.
-5. `data.py`: `sync_to_ground(delay_seconds)` — queue unsent rows and POST them to the
+6. `data.py`: `sync_to_ground(delay_seconds)` — queue unsent rows and POST them to the
    Worker after a simulated Earth-communication delay. Mark rows as synced in SQLite.
    Cloudflare failures must never crash the app; log and retry later.
 
@@ -59,7 +74,11 @@ cortisol µg/dL, glucose mg/dL, reaction_ms milliseconds, mood 1-5.
 - Windows + PowerShell. Activate the venv first: `.venv\Scripts\activate`.
 - Run the app: `python -m streamlit run app.py`.
 - Secrets (GEMINI_API_KEY, WORKER_URL, SYNC_KEY) live in `.env`. Never commit `.env`,
-  `mission.db`, `.venv/`, or `worker/node_modules/`.
+  `mission.db`, `.venv/`, `data/raw/`, or `worker/node_modules/`.
+  DO commit the small cleaned file `data/i4_blood.csv`.
+- Data sources to cite in comments and the README: NASA OSDR OSD-575 (Inspiration4
+  blood, CBC/CMP/cytokines) and OSD-157 (human blood irradiated ex vivo, 0-8 Gy;
+  cited as evidence only, not loaded).
 - Ask before adding any new dependency. Python deps go in `requirements.txt`.
 - Keep code beginner-readable: short functions, comments explaining *why*, and a
   one-line memory hook comment at the top of each main function.
