@@ -202,11 +202,29 @@ CREATE TABLE IF NOT EXISTS sync_log (
 """
 
 
+# Daily check-in journal: one row per completed check-in (mood questions +
+# memory test). Separate from readings because a check-in has free-text
+# answers and a memory score that the hourly row format doesn't have.
+CREATE_CHECK_INS_SQL = """
+CREATE TABLE IF NOT EXISTS check_ins (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp      TEXT NOT NULL,
+    mood           INTEGER NOT NULL CHECK (mood BETWEEN 1 AND 5),
+    memory_score   REAL NOT NULL CHECK (memory_score BETWEEN 0 AND 100),
+    reaction_ms    INTEGER,
+    answers        TEXT NOT NULL DEFAULT '[]',
+    gemini_summary TEXT,
+    simulated      INTEGER NOT NULL DEFAULT 0 CHECK (simulated IN (0, 1))
+)
+"""
+
+
 def _connect():
-    # Hook: open mission.db and make sure both tables exist.
+    # Hook: open mission.db and make sure all tables exist.
     conn = sqlite3.connect(DB_PATH)
     conn.execute(CREATE_TABLE_SQL)
     conn.execute(CREATE_SYNC_LOG_SQL)
+    conn.execute(CREATE_CHECK_INS_SQL)
     return conn
 
 
@@ -247,6 +265,7 @@ def _save_mission(df):
     with closing(_connect()) as conn:
         with conn:
             conn.executemany(INSERT_SQL, [_row_values(r) for r in df.to_dict("records")])
+            _prefill_check_ins(conn, df)  # same transaction: journal matches the mission
 
 
 def _ensure_mission():
@@ -258,6 +277,106 @@ def _ensure_mission():
         if count == 0:
             _save_mission(generate_mission())
             print(f"Built simulated mission in {DB_PATH.name}")
+
+
+# ---------------------------------------------------------------------------
+# Daily check-in journal (check_ins table).
+# ---------------------------------------------------------------------------
+
+# Memory-recall % for the simulated check-ins (5 words -> steps of 20%).
+# INVENTED demo values: the mission rows have no memory column. They follow the
+# same story as mood/reaction: dip on days 4-5 after the flare, recover by day 7.
+SIM_MEMORY_SCORE = {1: 80, 2: 80, 3: 80, 4: 40, 5: 60, 6: 60, 7: 80}
+
+CHECK_IN_COLUMNS = ["timestamp", "mood", "memory_score", "reaction_ms",
+                    "answers", "gemini_summary", "simulated"]
+INSERT_CHECK_IN_SQL = (f"INSERT INTO check_ins ({', '.join(CHECK_IN_COLUMNS)}) "
+                       f"VALUES ({', '.join('?' for _ in CHECK_IN_COLUMNS)})")
+
+
+def _prefill_check_ins(conn, mission):
+    # Hook: one simulated check-in per mission day, from the 09:00 mood/reaction row.
+    # Replaces old simulated rows only; real check-ins are never touched.
+    conn.execute("DELETE FROM check_ins WHERE simulated = 1")
+    daily = mission.dropna(subset=["mood"])
+    rows = []
+    for _, r in daily.iterrows():
+        day = (pd.Timestamp(r["timestamp"]) - MISSION_START).days + 1
+        rows.append([_to_sql_value(pd.Timestamp(r["timestamp"])), int(r["mood"]),
+                     SIM_MEMORY_SCORE.get(day, 80), _to_sql_value(r["reaction_ms"]),
+                     "[]", None, 1])
+    conn.executemany(INSERT_CHECK_IN_SQL, rows)
+
+
+def _read_daily_checks(conn):
+    # Hook: just the stored 09:00 rows (timestamp, mood, reaction) for the pre-fill.
+    return pd.read_sql_query(
+        "SELECT timestamp, mood, reaction_ms FROM readings "
+        "WHERE mood IS NOT NULL ORDER BY timestamp", conn)
+
+
+def _clean_check_in(entry):
+    # Hook: check one entry; return SQLite values, or an error message (str).
+    try:
+        timestamp = _to_sql_value(pd.Timestamp(entry["timestamp"]))
+    except (KeyError, ValueError, TypeError):
+        return "timestamp is required (use the mission replay time)"
+    mood, memory = entry.get("mood"), entry.get("memory_score")
+    reaction = entry.get("reaction_ms")
+    is_number = lambda v: isinstance(v, (int, float, np.number)) and not isinstance(v, bool)
+    if not is_number(mood) or int(mood) != mood or not 1 <= mood <= 5:
+        return "mood must be a whole number 1-5"
+    if not is_number(memory) or not 0 <= memory <= 100:
+        return "memory_score must be a number 0-100 (percent)"
+    if reaction is not None and (not is_number(reaction) or reaction <= 0):
+        return "reaction_ms must be a positive number or empty"
+    summary = entry.get("gemini_summary")
+    if summary is not None and not isinstance(summary, str):
+        return "gemini_summary must be text or empty"
+    try:
+        answers = json.dumps(entry.get("answers", []))  # stored as JSON text
+    except (TypeError, ValueError):
+        return "answers must be JSON-friendly (lists, dicts, text, numbers)"
+    return [timestamp, int(mood), float(memory),
+            None if reaction is None else round(float(reaction)),
+            answers, summary, 1 if entry.get("simulated") else 0]
+
+
+def save_check_in(entry: dict) -> bool:
+    # Hook: one finished check-in -> check_ins table. False (never a crash) if invalid.
+    values = _clean_check_in(entry)
+    if isinstance(values, str):
+        print(f"WARNING: check-in not saved: {values}")
+        return False
+    try:
+        with closing(_connect()) as conn:
+            with conn:
+                conn.execute(INSERT_CHECK_IN_SQL, values)
+        return True
+    except sqlite3.Error as err:
+        print(f"WARNING: check-in not saved: {err}")
+        return False
+
+
+def load_check_ins(limit=5) -> pd.DataFrame:
+    # Hook: newest check-ins first (limit=None -> all of them).
+    _ensure_mission()  # fresh disk: builds the mission AND its simulated check-ins
+    with _BUILD_LOCK, closing(_connect()) as conn:
+        # A mission.db built before this table existed has readings but no
+        # simulated check-ins yet: fill them in once from the stored mission.
+        if conn.execute("SELECT COUNT(*) FROM check_ins WHERE simulated = 1").fetchone()[0] == 0:
+            with conn:
+                _prefill_check_ins(conn, _read_daily_checks(conn))
+        df = pd.read_sql_query(
+            f"SELECT {', '.join(CHECK_IN_COLUMNS)} FROM check_ins "
+            "ORDER BY timestamp DESC, id DESC LIMIT ?",
+            conn, params=(-1 if limit is None else int(limit),),  # -1 = no limit in SQLite
+        )
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    df["answers"] = df["answers"].map(json.loads)  # JSON text -> Python list/dict
+    for col in ["mood", "reaction_ms", "simulated"]:
+        df[col] = df[col].astype("Int64")
+    return df
 
 
 def load_mission() -> pd.DataFrame:
