@@ -81,6 +81,18 @@ cortisol µg/dL, glucose mg/dL, reaction_ms milliseconds, mood 1-5.
   mood 4 baseline, dropping to 2 on days 4-5, recovering by day 7.
 - Days 1-3 before the flare are the baseline period for alert rules.
 
+## Demo checklist
+Do these right before the demo so the WhatsApp alert actually fires.
+1. Within 24 hours before the demo, from the phone in ALERT_TO, send any WhatsApp
+   message to the Twilio Sandbox number. The sandbox only delivers inside a 24-hour
+   window after the user last wrote to it (otherwise Twilio refuses, e.g. code 63016).
+2. Clear the alert cooldown on the remote D1 so the next sync can send an alert
+   (run in `worker/`):
+   `npx wrangler d1 execute astro-db --remote --command "DELETE FROM alert_log"`
+3. Reset and sync the mission (project root, venv active):
+   `python data.py` then `python data.py sync`
+   The flare (day 3, 11:00) turns red and sends one WhatsApp alert.
+
 ## Rules
 - Windows + PowerShell. Activate the venv first: `.venv\Scripts\activate`.
 - Run the app: `python -m streamlit run app.py`.
