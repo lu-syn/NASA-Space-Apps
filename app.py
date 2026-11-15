@@ -12,7 +12,7 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-from data import get_sync_status, load_i4_reference, load_mission
+from data import get_sync_status, load_check_ins, load_i4_reference, load_mission, save_check_in
 from rules import MISSION_DOSE_BUDGET, get_baseline, recent_dose_spike, signal_statuses, worst
 
 # ai.py talks to Gemini. If it can't be imported, the monitor still works:
@@ -283,6 +283,11 @@ st.markdown("""
         margin-bottom:14px; color:var(--ink); font-size:14px;}
 .panel h4 {margin:0 0 8px 0; padding:0; font-size:17px; font-weight:600; color:var(--ink);}
 .ev {border-left:3px solid; padding:3px 10px; margin:6px 0; font-size:14px;}
+/* Check-in journal */
+.journal {width:100%; border-collapse:collapse; font-size:15px; color:var(--ink);}
+.journal th {text-align:left; color:var(--dim); font-weight:500; padding:6px 8px; border-bottom:1px solid var(--edge);}
+.journal td {padding:8px; border-bottom:1px solid var(--edge);}
+.simtag {font-size:12px; padding:1px 8px; border-radius:999px; border:1px solid var(--dim); color:var(--dim);}
 
 /* ---------- Phones (screens 640px wide or less) ---------- */
 @media (max-width: 640px) {
@@ -911,14 +916,68 @@ def body_and_guidance():
     st.caption(f"⚕️ {DISCLAIMER}")
 
 
+def trend_arrow(new, old):
+    # Hook: ↑ better, ↓ worse, → same (for mood and memory, higher is better).
+    if pd.isna(new) or pd.isna(old):
+        return ""
+    return "↑" if new > old else "↓" if new < old else "→"
+
+
+def check_in_history(now_ts):
+    # Hook: the astronaut's journal from Lu's check_ins table: the last 5 entries
+    # up to the mission time on screen (never "future" days), a comparison of
+    # the newest two, and a Gemini summary on request.
+    st.subheader("Your last 5 check-ins")
+    journal = load_check_ins(None)
+    journal = journal[journal["timestamp"] <= now_ts].head(5)  # newest first
+    if journal.empty:
+        st.caption("No check-ins yet. Your first one will appear here.")
+        return
+
+    # Newest vs the one before, e.g. "Mood 4 vs 2 last time ↑ · Memory 80% vs 60% ↑"
+    if len(journal) >= 2:
+        new, old = journal.iloc[0], journal.iloc[1]
+        st.markdown(
+            f"**Mood {new['mood']} vs {old['mood']} last time "
+            f"{trend_arrow(new['mood'], old['mood'])}** &nbsp;·&nbsp; "
+            f"**Memory {new['memory_score']:.0f}% vs {old['memory_score']:.0f}% "
+            f"{trend_arrow(new['memory_score'], old['memory_score'])}**")
+        st.caption("↑ better than last time · ↓ lower than last time · → the same")
+
+    sim_tag = '<span class="simtag">simulated</span>'
+    rows = "".join(
+        f"<tr><td>{mission_clock(r['timestamp'])[0]}</td>"
+        f"<td>{r['timestamp']:%d %b}</td>"
+        f"<td>{r['mood']} / 5</td>"
+        f"<td>{r['memory_score']:.0f}%</td>"
+        f"<td>{sim_tag if r['simulated'] == 1 else 'You'}</td></tr>"
+        for _, r in journal.iterrows())
+    st.markdown(
+        '<div class="panel"><table class="journal"><tr><th>When</th><th>Date</th>'
+        f"<th>Mood</th><th>Memory</th><th>Entry</th></tr>{rows}</table></div>",
+        unsafe_allow_html=True)
+
+    # Gemini trend summary, only when asked (it's slow and needs internet).
+    if st.button("Summarize my check-ins", width="stretch"):
+        with st.spinner("Gemini is reading your check-ins..."):
+            summary = ai.summarize_check_ins(journal) if ai is not None else None
+        st.session_state.journal_summary = summary or "Gemini unavailable"
+    if "journal_summary" in st.session_state:
+        st.info(st.session_state.journal_summary)
+
+
 def daily_check_in():
-    # Hook: today's mood questions (Gemini) and a memory test. No auto-refresh here,
-    # so the page doesn't jump while the astronaut is typing.
-    mission_bar(mission["timestamp"].iloc[current_index()])
+    # Hook: today's mood questions (Gemini) and a memory test, saved to the
+    # check-in journal. No auto-refresh here, so the page doesn't jump while
+    # the astronaut is typing.
+    now_ts = mission["timestamp"].iloc[current_index()]  # mission replay time, NOT the real clock
+    # No mission header or timeline strip here: this page is just the check-in.
     st.subheader("📝 Daily check-in")
-    st.caption("Takes about 2 minutes. Your answers help spot stress, fatigue and low mood early.")
+    st.caption(f"Mission time {mission_clock(now_ts)[0]}. Takes about 2 minutes. "
+               "Your answers help spot stress, fatigue and low mood early.")
     if ai is None:
         st.warning(f"The check-in needs ai.py, which could not be loaded: {AI_IMPORT_ERROR}")
+        check_in_history(now_ts)
         return
 
     mood_col, memory_col = st.columns(2)
@@ -932,11 +991,16 @@ def daily_check_in():
                        for i, q in enumerate(st.session_state.questions)]
             submitted = st.form_submit_button("Submit answers", width="stretch")
         if submitted:
+            st.session_state.mood_answers = [{"question": q, "answer": a}
+                                             for q, a in zip(st.session_state.questions, answers)]
             with st.spinner("Gemini is reading your answers..."):
                 st.session_state.mood_result = ai.score_mood(st.session_state.questions, answers)
         result = st.session_state.get("mood_result")
         if result and "error" in result:
             st.error(f"Gemini could not score the check-in: {result['error']}")
+            # Never block the journal on Gemini: the astronaut can rate it themselves.
+            st.select_slider("Rate your mood yourself (1 = very low, 5 = very good)",
+                             options=[1, 2, 3, 4, 5], value=3, key="manual_mood")
         elif result:
             st.success(f"Mood score: **{result['mood']} / 5**. {result['summary']}")
 
@@ -959,6 +1023,37 @@ def daily_check_in():
                 st.session_state.memory_score = ai.memory_score(words, recalled)
             if "memory_score" in st.session_state:
                 st.success(f"You remembered **{st.session_state.memory_score}%** of the words.")
+
+    # 3. Save: once BOTH parts are done, write one entry to Lu's check-in journal.
+    result = st.session_state.get("mood_result") or {}
+    mood = result.get("mood") if "error" not in result else st.session_state.get("manual_mood")
+    memory = st.session_state.get("memory_score")
+    with st.container(border=True):
+        st.markdown("**3. Save today's check-in**")
+        if mood is None or memory is None:
+            st.caption("Finish both parts above, then save your check-in here.")
+        else:
+            entry_key = (str(now_ts), mood, memory)
+            already = st.session_state.get("saved_entry") == entry_key
+            st.caption(f"Mission time {mission_clock(now_ts)[0]}: mood {mood} / 5, memory {memory}%.")
+            if st.button("Saved ✓" if already else "Save check-in", disabled=already, width="stretch"):
+                saved = save_check_in({
+                    "timestamp": str(now_ts),          # replay time shown on screen
+                    "mood": int(mood),
+                    "memory_score": float(memory),
+                    "answers": st.session_state.get("mood_answers", []),
+                    "gemini_summary": result.get("summary") if "error" not in result else None,
+                    "simulated": 0,                    # a real entry typed by the astronaut
+                })
+                if saved:
+                    st.session_state.saved_entry = entry_key
+                    st.session_state.pop("journal_summary", None)  # old summary is out of date
+                    st.rerun()
+                else:
+                    st.error("The check-in could not be saved. Please try again.")
+
+    st.divider()
+    check_in_history(now_ts)
     st.caption(f"⚕️ {DISCLAIMER}")
 
 
