@@ -169,11 +169,12 @@ npm run deploy
 
 ## Team
 
-| Name | Built |
+
+| Name | Focus |
 | --- | --- |
-| Lu | Simulated mission and storage, Inspiration4 data, Cloudflare Worker + D1, sync, Twilio WhatsApp alert, deployment |
-| Liz | Gemini questionnaire and AI (`ai.py`), alert rules (`rules.py`) |
-| Gowri | Streamlit dashboard (`app.py`) |
+| Luis | Data and cloud |
+| Liz | AI and alert rules |
+| Gowri | Dashboard and design |
 
 ## Sources
 
