@@ -1,0 +1,7 @@
+# Dark "spacecraft cabin panel" look for the dashboard (UI only).
+[theme]
+base = "dark"
+primaryColor = "#2F6FD0"
+backgroundColor = "#0E1A2B"
+secondaryBackgroundColor = "#15263C"
+textColor = "#E8EEF6"
