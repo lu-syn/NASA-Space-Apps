@@ -5,6 +5,7 @@ come from rules.py (Liz) and run onboard instantly; Gemini (ai.py) only explains
 Demo controls (jump to the flare, speed, pause) live in the sidebar, out of the
 astronaut's way.
 """
+from data import ensure_ready; ensure_ready()  # build mission.db if needed + one background sync
 import time
 
 import altair as alt
