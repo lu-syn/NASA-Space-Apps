@@ -5,6 +5,7 @@ come from rules.py (Liz) and run onboard instantly; Gemini (ai.py) only explains
 Demo controls (jump to the flare, speed, pause) live in the sidebar, out of the
 astronaut's way.
 """
+from data import ensure_ready; ensure_ready()  # build mission.db if needed + one background sync
 import time
 
 import altair as alt
@@ -42,8 +43,9 @@ SPEEDS = {                    # real seconds per mission hour
 DEFAULT_SPEED = "Normal (1 h every 2 s)"
 FEED_START = (3, 6)           # (day, hour) the live feed starts at: just before the flare
 
-STATUS_COLOR = {"green": "#2ea043", "yellow": "#d29922", "red": "#f85149"}
-STATUS_WORD = {"green": "NOMINAL", "yellow": "CAUTION", "red": "WARNING"}
+# "Cabin panel" palette: calm navy hull, three alarm colors from patient monitors.
+STATUS_COLOR = {"green": "#3FB68B", "yellow": "#F2B33D", "red": "#EF5A4C"}
+STATUS_WORD = {"green": "Nominal", "yellow": "Caution", "red": "Warning"}
 
 NUMBER_COLUMNS = ["dose_rate", "total_dose", "heart_rate", "crp",
                   "cortisol", "glucose", "reaction_ms", "mood"]
@@ -201,34 +203,120 @@ SOURCES = ("Sources: [NASA HRP: 5 Hazards of Human Spaceflight](https://www.nasa
 
 st.set_page_config(page_title="Astronaut Health Monitor", page_icon="🛰️", layout="wide")
 
-# Styling for the custom tiles and banners (works best with the dark theme).
+# Look and feel: a spacecraft cabin panel crossed with a patient monitor.
+# Dark navy (low glare in a dim cabin), Barlow type (aerospace placard style),
+# calm when nominal, loud only when something needs attention.
 st.markdown("""
 <style>
-.block-container {padding-top: 3.5rem;}
-.mbar {display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;
-       background:#0d1726;border:1px solid #1f2d44;border-radius:10px;padding:10px 16px;
-       color:#c9d6e8;font-size:14px;}
-.mbar b {color:#ffffff;}
-.live {color:#f85149;font-weight:700;letter-spacing:1px;}
-.live:before {content:"● ";animation:blink 1.2s infinite;}
-.paused {color:#8b9bb4;font-weight:700;letter-spacing:1px;}
-@keyframes blink {50% {opacity:.2;}}
-.banner {border-radius:10px;padding:12px 18px;margin:10px 0;color:#fff;}
-.banner .big {font-size:24px;font-weight:800;letter-spacing:.5px;}
-.banner .small {font-size:15px;opacity:.95;margin-top:2px;}
-.tile {background:#0f1b2d;border:1px solid #1f2d44;border-left-width:5px;border-radius:10px;
-       padding:10px 12px;margin-bottom:12px;color:#c9d6e8;min-height:150px;}
-.tile .lbl {font-size:12px;text-transform:uppercase;letter-spacing:.6px;display:flex;
-            justify-content:space-between;align-items:center;}
-.tile .pill {font-size:10px;font-weight:700;padding:1px 7px;border-radius:9px;color:#0b1220;}
-.tile .val {font-size:30px;font-weight:700;color:#ffffff;line-height:1.2;margin-top:4px;}
-.tile .unit {font-size:14px;font-weight:400;color:#8b9bb4;}
-.tile .sub {font-size:13px;}
-.tile .foot {font-size:11px;color:#8b9bb4;margin-top:2px;}
-.panel {background:#0f1b2d;border:1px solid #1f2d44;border-radius:10px;padding:12px 14px;
-        margin-bottom:12px;color:#c9d6e8;font-size:14px;}
-.panel h4 {margin:0 0 6px 0;font-size:13px;text-transform:uppercase;letter-spacing:.6px;color:#8b9bb4;}
-.ev {border-left:3px solid;padding:2px 8px;margin:5px 0;font-size:13px;}
+@import url('https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700&family=Barlow+Semi+Condensed:wght@500;600;700&display=swap');
+:root {--hull:#0E1A2B; --panel:#15263C; --edge:#24405F; --ink:#E8EEF6; --dim:#93A6BF;
+       --ok:#3FB68B; --warn:#F2B33D; --alarm:#EF5A4C; --cabin:#7FB7FF;}
+.stApp {background:var(--hull);}
+.stApp, .stApp p, .stApp li, .stApp label, .stApp button, .stApp input, .stApp textarea {
+    font-family:'Barlow','Segoe UI',sans-serif;}
+.stApp h1, .stApp h2, .stApp h3, .stApp h4 {font-family:'Barlow Semi Condensed','Barlow',sans-serif;
+    font-weight:600;}
+.block-container {padding-top:3.5rem; max-width:1500px;}
+
+/* Page buttons */
+.st-key-nav button {border-radius:10px; min-height:44px;}
+.st-key-nav button p {font-size:15px; font-weight:600;}
+
+/* Mission header: name, the mission clock (hero), feed + ground link */
+.mhead {background:var(--panel); border:1px solid var(--edge); border-radius:14px;
+        padding:14px 20px 10px; color:var(--ink); margin-top:4px;}
+.mtop {display:flex; justify-content:space-between; align-items:flex-end; gap:16px; flex-wrap:wrap;}
+.mname {font-size:19px; font-weight:600; line-height:1.3;}
+.mname small {display:block; font-size:14px; font-weight:400; color:var(--dim);}
+.met {text-align:center;}
+.met .lbl {display:block; font-size:13px; color:var(--dim);}
+.met .val {font-family:'Barlow Semi Condensed',sans-serif; font-size:36px; font-weight:600;
+           line-height:1; font-variant-numeric:tabular-nums; letter-spacing:.5px;}
+.met .day {display:block; font-size:14px; color:var(--dim); margin-top:2px;}
+.mstate {text-align:right; font-size:14px; color:var(--dim); line-height:1.6;}
+.live {color:var(--alarm); font-weight:600;}
+.live:before {content:"\\25CF  ";}
+.paused {color:var(--dim); font-weight:600;}
+
+/* Mission ribbon: one bar per mission hour, colored by that hour's status */
+.ribbon {position:relative; margin-top:14px;}
+.ribbon svg {width:100%; height:14px; display:block;}
+.ribbon .now {position:absolute; top:-5px; width:3px; height:24px; background:var(--ink);
+              border-radius:2px; transform:translateX(-50%);}
+.ribbon .draw {position:absolute; top:19px; width:7px; height:7px; border:1px solid var(--dim);
+               transform:translateX(-50%) rotate(45deg);}
+.ribbon .draw.done {background:var(--ink); border-color:var(--ink);}
+.ribbon .days {display:flex; margin-top:16px; font-size:12px; color:var(--dim);}
+.ribbon .days span {flex:1;}
+.ribbon .key {font-size:12px; color:var(--dim); text-align:right; margin-top:2px;}
+
+/* Status banner: quiet when nominal, filled amber or red when not */
+.banner {display:flex; gap:6px 18px; align-items:baseline; flex-wrap:wrap; border-radius:14px;
+         padding:14px 22px; margin:14px 0;}
+.banner .word {font-family:'Barlow Semi Condensed',sans-serif; font-size:32px; font-weight:700; line-height:1;}
+.banner .head {font-size:19px; font-weight:600;}
+.banner .small {flex-basis:100%; font-size:15px;}
+.banner-green {background:var(--panel); border:1px solid var(--edge); border-left:6px solid var(--ok); color:var(--ink);}
+.banner-green .word {color:var(--ok);}
+.banner-yellow {background:var(--warn); color:#241A02;}
+.banner-red {background:var(--alarm); color:#FFFFFF; animation:alarm 2.4s ease-in-out infinite;}
+@keyframes alarm {0%, 100% {box-shadow:0 0 0 0 rgba(239,90,76,0);}
+                  50% {box-shadow:0 0 0 7px rgba(239,90,76,.35);}}
+@media (prefers-reduced-motion: reduce) {.banner-red {animation:none;}}
+
+/* Vital-sign tiles (one per channel, like a patient monitor) */
+.tile {background:var(--panel); border:1px solid var(--edge); border-left:4px solid; border-radius:12px;
+       padding:12px 14px; margin-bottom:14px; color:var(--ink); min-height:160px;}
+.tile.s-yellow {border-color:rgba(242,179,61,.6);}
+.tile.s-red {border-color:rgba(239,90,76,.75); box-shadow:0 0 0 1px rgba(239,90,76,.35) inset;}
+.tile .lbl {font-size:14px; font-weight:500; color:var(--dim); display:flex; justify-content:space-between;
+            align-items:center; gap:6px;}
+.tile .pill {font-size:12px; font-weight:600; padding:1px 10px; border-radius:999px; color:#0E1A2B;}
+.tile .val {font-family:'Barlow Semi Condensed',sans-serif; font-size:40px; font-weight:600; line-height:1.1;
+            margin-top:6px; font-variant-numeric:tabular-nums; color:var(--ink);}
+.tile .unit {font-family:'Barlow',sans-serif; font-size:15px; font-weight:400; color:var(--dim); margin-left:3px;}
+.tile .sub {font-size:14px;}
+.tile .foot {font-size:12px; color:var(--dim); margin-top:4px;}
+
+/* Side panels */
+.panel {background:var(--panel); border:1px solid var(--edge); border-radius:12px; padding:14px 16px;
+        margin-bottom:14px; color:var(--ink); font-size:14px;}
+.panel h4 {margin:0 0 8px 0; padding:0; font-size:17px; font-weight:600; color:var(--ink);}
+.ev {border-left:3px solid; padding:3px 10px; margin:6px 0; font-size:14px;}
+
+/* ---------- Phones (screens 640px wide or less) ---------- */
+@media (max-width: 640px) {
+  .block-container {padding:3.5rem 0.75rem 1rem 0.75rem;}
+  .mhead {padding:12px 14px 8px;}
+  .mtop {flex-direction:column; align-items:flex-start; gap:8px;}
+  .met {text-align:left;}
+  .met .val {font-size:30px;}
+  .mstate {text-align:left;}
+  .ribbon .key {text-align:left;}
+  .banner {padding:12px 14px;}
+  .banner .word {font-size:24px;}
+  .banner .head {font-size:16px;}
+  .banner .small {font-size:13px;}
+  /* Tiles: compact, 2 per row instead of 1 long column */
+  .tile {min-height:0; padding:10px; margin-bottom:8px;}
+  .tile .lbl {font-size:12px; flex-wrap:wrap; gap:4px;}
+  .tile .val {font-size:28px;}
+  .tile .sub {font-size:12px;}
+  .st-key-tiles [data-testid="stHorizontalBlock"] {flex-wrap:wrap !important; gap:0.5rem !important;}
+  .st-key-tiles [data-testid="stColumn"], .st-key-tiles [data-testid="column"] {
+      flex:1 1 calc(50% - 0.5rem) !important; min-width:calc(50% - 0.5rem) !important;
+      width:calc(50% - 0.5rem) !important;}
+  /* Page buttons: stay side by side in one row */
+  .st-key-nav [data-testid="stHorizontalBlock"] {flex-wrap:nowrap !important; gap:0.4rem !important;}
+  .st-key-nav [data-testid="stColumn"], .st-key-nav [data-testid="column"] {
+      flex:1 1 0 !important; min-width:0 !important; width:auto !important;}
+  .st-key-nav button {padding:0.3rem 0.2rem !important;}
+  .st-key-nav button p {font-size:12px !important;}
+  /* Main area: show "Do this now" ABOVE the charts on a phone */
+  .st-key-main [data-testid="stHorizontalBlock"] {flex-direction:column !important;}
+  .st-key-main [data-testid="stColumn"]:nth-child(2),
+  .st-key-main [data-testid="column"]:nth-child(2) {order:-1;}
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -312,8 +400,8 @@ def i4_crp_chart():
     # value (1.0 = pre-flight), before and after the 3-day flight.
     ref = get_i4_reference().dropna(subset=["crp_fold_change"])
     flight = pd.DataFrame({"start": [0], "end": [3]})  # Inspiration4 flew 3 days
-    band = alt.Chart(flight).mark_rect(color="#58a6ff", opacity=0.15).encode(x="start:Q", x2="end:Q")
-    one = alt.Chart(pd.DataFrame({"y": [1.0]})).mark_rule(strokeDash=[4, 4], color="#8b9bb4").encode(y="y:Q")
+    band = alt.Chart(flight).mark_rect(color="#7FB7FF", opacity=0.15).encode(x="start:Q", x2="end:Q")
+    one = alt.Chart(pd.DataFrame({"y": [1.0]})).mark_rule(strokeDash=[4, 4], color="#93A6BF").encode(y="y:Q")
     lines = alt.Chart(ref).mark_line(point=True).encode(
         x=alt.X("days_from_launch:Q", title="Days from launch (flight = shaded)"),
         y=alt.Y("crp_fold_change:Q", title="CRP × pre-flight"),
@@ -475,7 +563,7 @@ def tile(key, status, now_df, baseline):
     value, sub, footer, recent = describe(key, now_df, baseline)
     color = STATUS_COLOR[status]
     st.markdown(f"""
-    <div class="tile" style="border-left-color:{color}">
+    <div class="tile s-{status}" style="border-left-color:{color}">
       <div class="lbl"><span>{ind['icon']} {ind['name']}</span>
         <span class="pill" style="background:{color}">{STATUS_WORD[status]}</span></div>
       <div class="val">{value} <span class="unit">{ind['unit']}</span></div>
@@ -499,14 +587,47 @@ def sync_label():
             f"· last sync {sync['last_sync']}")
 
 
+def mission_ribbon(now_index):
+    # Hook: the whole mission as one strip, one thin bar per hour, colored by
+    # that hour's status. Hours not reached yet stay dim. White line = now,
+    # diamonds = blood draws (filled once done).
+    timeline = status_timeline(mission)
+    total = len(mission)
+    bars = "".join(
+        f'<rect x="{i}" y="0" width="0.82" height="10" '
+        f'fill="{STATUS_COLOR[timeline[i]["status"]] if i <= now_index else "#24405F"}"/>'
+        for i in range(total))
+    draws = "".join(
+        f'<span class="draw{" done" if i <= now_index else ""}" style="left:{100 * (i + 0.4) / total:.2f}%" '
+        f'title="SERS blood draw"></span>'
+        for i in mission.index[mission["crp"].notna()])
+    days = "".join(f"<span>Day {d}</span>" for d in range(1, total // 24 + 1))
+    return f"""
+      <div class="ribbon" role="img" aria-label="Mission timeline, one bar per hour colored by status">
+        <svg viewBox="0 0 {total} 10" preserveAspectRatio="none">{bars}</svg>
+        <span class="now" style="left:{100 * (now_index + 1) / total:.2f}%"></span>
+        {draws}
+        <div class="days">{days}</div>
+        <div class="key">Each bar is one mission hour, colored by status. Diamonds are blood draws.</div>
+      </div>"""
+
+
 def mission_bar(now_ts):
-    # Hook: the strip at the top: mission, crew, clock, LIVE light, ground link.
+    # Hook: mission name, the mission clock (MET), feed state, ground link,
+    # and the mission ribbon underneath.
     day_label, met = mission_clock(now_ts)
-    state = '<span class="paused">❚❚ PAUSED</span>' if st.session_state.paused else '<span class="live">SIMULATED LIVE</span>'
+    now_index = int((now_ts - START) / pd.Timedelta(hours=1))
+    feed = ('<span class="paused">Feed paused</span>' if st.session_state.paused
+            else '<span class="live">SIMULATED LIVE</span>')
     st.markdown(f"""
-    <div class="mbar">
-      <span>🛰️ <b>{MISSION_NAME}</b> &nbsp;|&nbsp; 👩‍🚀 {CREW_MEMBER} &nbsp;|&nbsp; Environment: spacecraft</span>
-      <span>{sync_label()} &nbsp;|&nbsp; <b>{met}</b> &nbsp;({day_label}) &nbsp;&nbsp; {state}</span>
+    <div class="mhead">
+      <div class="mtop">
+        <div class="mname">🛰️ {MISSION_NAME}<small>👩‍🚀 {CREW_MEMBER}, on board the spacecraft</small></div>
+        <div class="met"><span class="lbl">Mission elapsed time</span>
+          <span class="val">{met.removeprefix("MET ")}</span><span class="day">{day_label}</span></div>
+        <div class="mstate">{feed}<br>{sync_label()}</div>
+      </div>
+      {mission_ribbon(now_index)}
     </div>""", unsafe_allow_html=True)
 
 
@@ -518,12 +639,13 @@ def status_banner(status, signals, now_df, baseline):
         details = " · ".join(f"{INDICATORS[k]['name']}: {describe(k, now_df, baseline)[1]}" for k in flagged[:3])
     else:
         details = "All indicators within your normal range."
-    headline = {"green": "All systems nominal",
-                "yellow": "Caution: keep an eye on the flagged indicators",
-                "red": "Warning: act now and contact the flight surgeon"}[status]
+    headline = {"green": "All systems nominal.",
+                "yellow": "Keep an eye on the flagged indicators.",
+                "red": "Act now and contact the flight surgeon."}[status]
     st.markdown(f"""
-    <div class="banner" style="background:{STATUS_COLOR[status]}">
-      <div class="big">{STATUS_WORD[status]} · {headline}</div>
+    <div class="banner banner-{status}" role="status">
+      <div class="word">{STATUS_WORD[status]}</div>
+      <div class="head">{headline}</div>
       <div class="small">{details}</div>
     </div>""", unsafe_allow_html=True)
 
@@ -570,13 +692,13 @@ def trend_chart(df, column, title, unit, spikes, window_hours, points=False):
     data = df[df["timestamp"] >= start][["timestamp", column]].dropna()
     x = alt.X("timestamp:T", title=None, scale=alt.Scale(domain=domain),
               axis=alt.Axis(format="%d %b %H:%M", labelAngle=0, tickCount=4))
-    line = alt.Chart(data).mark_line(point=points, color="#58a6ff").encode(
-        x=x, y=alt.Y(f"{column}:Q", title=unit, scale=alt.Scale(zero=False)),
+    line = alt.Chart(data).mark_line(point=points, color="#7FB7FF").encode(
+        x=x, y=alt.Y(f"{column}:Q", title=unit, scale=alt.Scale(zero=False), axis=alt.Axis(format="~g")),
         tooltip=[alt.Tooltip("timestamp:T", title="Time", format="%d %b %H:%M"),
                  alt.Tooltip(f"{column}:Q", title=title)])
     shown = spikes[spikes["end"] >= start] if not spikes.empty else spikes
     if not shown.empty:
-        band = alt.Chart(shown).mark_rect(color="#f85149", opacity=0.18).encode(x="start:T", x2="end:T")
+        band = alt.Chart(shown).mark_rect(color="#EF5A4C", opacity=0.22).encode(x="start:T", x2="end:T")
         line = band + line
     return line.properties(title=title, height=200)
 
@@ -585,12 +707,12 @@ def body_map_svg(system_status, selected):
     # Hook: a simple human figure; each body system is colored by its worst status.
     c = {name: STATUS_COLOR[s] for name, s in system_status.items()}
     def ring(name):  # thicker white outline on the selected system
-        return 'stroke="#ffffff" stroke-width="3"' if name == selected else 'stroke="#0b1220" stroke-width="1"'
+        return 'stroke="#E8EEF6" stroke-width="3"' if name == selected else 'stroke="#0E1A2B" stroke-width="1"'
     rad, heart = "Whole body: radiation", "Heart & circulation"
     imm, brain = "Immune & metabolism", "Brain & behavior"
     return f"""
     <svg viewBox="0 0 200 330" style="width:100%;max-width:260px;display:block;margin:auto">
-      <g fill="#1b2a41" stroke="{c[rad]}" stroke-width="{4 if selected == rad else 2.5}">
+      <g fill="#15263C" stroke="{c[rad]}" stroke-width="{4 if selected == rad else 2.5}">
         <circle cx="100" cy="40" r="26"/>
         <rect x="62" y="72" width="76" height="110" rx="20"/>
         <rect x="34" y="78" width="22" height="100" rx="11"/>
@@ -602,8 +724,6 @@ def body_map_svg(system_status, selected):
       <path d="M113 104 c0-8 12-8 12 0 c0 8-12 14-12 18 c0-4-12-10-12-18 c0-8 12-8 12 0z"
             fill="{c[heart]}" {ring(heart)}/>
       <ellipse cx="100" cy="150" rx="24" ry="16" fill="{c[imm]}" {ring(imm)}/>
-      <text x="100" y="325" fill="#8b9bb4" font-size="10" text-anchor="middle">
-        Outline = radiation · head = brain · heart · belly = immune/metabolism</text>
     </svg>"""
 
 
@@ -646,7 +766,8 @@ def go_to_page(name):
 
 
 # Page menu: three big buttons. The page you're on is filled in (primary).
-for column, name in zip(st.columns(len(PAGES)), PAGES):
+nav = st.container(key="nav")  # named so phone styles can keep it in one row
+for column, name in zip(nav.columns(len(PAGES)), PAGES):
     column.button(name, on_click=go_to_page, args=(name,), width="stretch",
                   type="primary" if st.session_state.page == name else "secondary")
 page = st.session_state.page
@@ -666,12 +787,14 @@ def live_monitor():
     status_banner(current["status"], signals, now_df, baseline)
 
     tile_keys = list(INDICATORS)
+    tiles = st.container(key="tiles")  # named so phone styles can show 2 tiles per row
     for row_keys in (tile_keys[:4], tile_keys[4:]):
-        for col, key in zip(st.columns(4), row_keys):
+        for col, key in zip(tiles.columns(4), row_keys):
             with col:
                 tile(key, signals[key], now_df, baseline)
 
-    left, right = st.columns([2, 1])
+    main = st.container(key="main")  # named so phones show "Do this now" first
+    left, right = main.columns([2, 1])
     with left:
         window = st.radio("Trend window", ["Last 24 h", "Last 72 h", "Whole mission"],
                           index=1, horizontal=True, key="window")
@@ -744,6 +867,8 @@ def body_and_guidance():
                             format_func=lambda n: f"{n} ({STATUS_WORD[system_status[n]]})")
     with left:
         st.markdown(body_map_svg(system_status, selected), unsafe_allow_html=True)
+        st.caption("Outline = whole body (radiation) · Head = brain & behavior · "
+                   "Heart = heart & circulation · Belly = immune & metabolism")
     with right:
         for key in BODY_SYSTEMS[selected]:
             ind, status = INDICATORS[key], signals[key]
