@@ -220,6 +220,50 @@ def explain_status(row, flags, history):
     return result
 
 
+# ---------- summarize_check_ins(df) ----------
+
+JOURNAL_PROMPT = f"""You read an astronaut's recent daily check-ins (hackathon demo; rows marked
+simulated are demo data). Each has: mission day, mood (1 = very low, 5 = very good), memory
+recall (% of 5 words remembered) and reaction time (ms, lower is faster).
+Write 2-3 plain, kind sentences about the TREND, for example
+"Your memory recall has improved since day 4." Compare days with each other; use the numbers.
+Never diagnose a disease or condition and never give medical advice.
+Then add this exact sentence: "{DISCLAIMER}"
+Reply with JSON only: {{"summary": "<your sentences>"}}"""
+
+
+def summarize_check_ins(df):
+    """Gemini's 2-3 sentence trend summary of check-ins (from data.load_check_ins).
+
+    Returns the text, or None on any error (no key, offline, bad JSON, no data).
+    """
+    try:
+        from data import MISSION_START  # day numbers like the dashboard ("day 4")
+        if df is None or len(df) == 0:
+            return None
+        rows = df.sort_values("timestamp")  # oldest first reads as a trend
+        entries = [{
+            "mission_day": (pd.Timestamp(r["timestamp"]) - MISSION_START).days + 1,
+            "date": str(pd.Timestamp(r["timestamp"]).date()),
+            "mood": None if pd.isna(r["mood"]) else int(r["mood"]),
+            "memory_percent": None if pd.isna(r["memory_score"]) else float(r["memory_score"]),
+            "reaction_ms": None if pd.isna(r["reaction_ms"]) else int(r["reaction_ms"]),
+            "simulated": bool(r.get("simulated", 0)),
+        } for _, r in rows.iterrows()]
+
+        def check(data):
+            if not (isinstance(data, dict) and isinstance(data.get("summary"), str)
+                    and data["summary"].strip()):
+                raise ValueError("Gemini returned JSON in the wrong shape")
+            return data["summary"].strip()
+
+        summary = _ask_json(json.dumps(entries), JOURNAL_PROMPT, check)
+    except Exception:
+        return None
+    # Safety net: the flight-surgeon sentence is always there.
+    return summary if "flight surgeon" in summary.lower() else f"{summary} {DISCLAIMER}"
+
+
 # ---------- daily check ----------
 
 DEFAULT_QUESTIONS = [
