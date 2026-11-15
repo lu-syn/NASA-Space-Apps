@@ -12,7 +12,8 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
-from rules import demo_df, local_evaluation, recent_dose_spike, worst
+from rules import (MISSION_DOSE_BUDGET, demo_df, get_baseline, local_evaluation,
+                   recent_dose_spike, worst)
 
 load_dotenv()
 
@@ -139,6 +140,84 @@ def evaluate(df):
         "signals": local["signals"],
         "disclaimer": DISCLAIMER,
     }
+
+
+# ---------- explain_status(row, flags, history) ----------
+
+# Plain-language versions of the thresholds in rules.signal_statuses, so Gemini
+# explains the SAME rules that colored the screen. Keep in sync with rules.py.
+RULE_TEXT = {
+    "dose_rate": "Dose rate: yellow at 3x baseline, red at 10x baseline.",
+    "mission_dose": f"Mission total dose: yellow above 50%, red above 80% of the {MISSION_DOSE_BUDGET:g} mGy demo budget.",
+    "heart_rate": "Resting heart rate: yellow at 15% above baseline, red at 30% above.",
+    "crp": "CRP (latest draw): yellow at 2x baseline, red at 5x.",
+    "glucose": "Fasting glucose (latest draw): yellow above 100 mg/dL, red above 126 mg/dL.",
+    "reaction": "Reaction time (latest check): yellow at 15% slower than baseline, red at 30% slower.",
+    "cortisol": "Cortisol: yellow if the last 2 draws are both 1.5x baseline or more, red at 2x.",
+    "mood": "Mood: yellow after 3 days in a row averaging 2 or lower, red after 5 days.",
+}
+
+EXPLAIN_PROMPT = f"""You explain an astronaut health dashboard's alerts in plain language.
+Hackathon demo: all data is simulated. Never diagnose a disease or condition; describe what the
+numbers show and what the onboard guidance suggests. The alert colors were already set by fixed
+rules; explain them, never change or argue with them.
+Compare to this astronaut's own baseline. Call a CRP rise "likely radiation-related" ONLY if
+recent_dose_spike_48h is true; otherwise say "possible infection or strain".
+If any flag is red, one action must be to contact the flight surgeon.
+Reply with JSON only, exactly:
+{{"summary": "<one plain sentence>", "why": "<short reason>", "actions": ["<2 or 3 short steps>"]}}
+The summary or why must briefly say: "{DISCLAIMER}\""""
+
+
+def _check_explanation(data):
+    if not isinstance(data, dict):
+        raise ValueError("Gemini returned JSON in the wrong shape")
+    actions = data.get("actions")
+    if (not isinstance(data.get("summary"), str) or not isinstance(data.get("why"), str)
+            or not isinstance(actions, list) or not 2 <= len(actions) <= 3
+            or not all(isinstance(a, str) for a in actions)):
+        raise ValueError("Gemini returned JSON in the wrong shape")
+    return {"summary": data["summary"], "why": data["why"], "actions": actions}
+
+
+def _trends_72h(history):
+    """Last 72 h: dose and heart rate as 3-hour averages, plus every blood/check result."""
+    t = pd.to_datetime(history["timestamp"])
+    recent = history[t >= t.max() - pd.Timedelta(hours=72)].copy()
+    recent["timestamp"] = pd.to_datetime(recent["timestamp"])
+    live = (recent.set_index("timestamp")[["dose_rate", "heart_rate"]]
+            .resample("3h").mean().round(1).reset_index())
+    periodic = recent[["timestamp", "crp", "cortisol", "glucose", "reaction_ms", "mood"]]
+    periodic = periodic.dropna(how="all", subset=periodic.columns[1:])
+    as_records = lambda df: json.loads(df.to_json(orient="records", date_format="iso"))  # NaN -> null
+    peak = recent.loc[recent["dose_rate"].idxmax()]  # true hourly peak (averages hide it)
+    return {"every_3h": as_records(live), "measurements": as_records(periodic),
+            "dose_rate_peak": {"value": float(peak["dose_rate"]), "time": peak["timestamp"].isoformat()}}
+
+
+def explain_status(row, flags, history):
+    """Gemini explains the current alerts. flags = {signal: "yellow"/"red"} from rules.py.
+
+    Returns {"summary", "why", "actions"} or None on any error (no key, offline, bad JSON).
+    """
+    try:
+        baseline = get_baseline(history)
+        payload = {
+            "current_reading": json.loads(pd.Series(row).to_json(date_format="iso")),
+            "baseline_first_3_days": {k: (None if pd.isna(v) else round(float(v), 2))
+                                      for k, v in baseline.items()},
+            "flagged_signals": [{"signal": k, "status": s, "rule": RULE_TEXT.get(k, "")}
+                                for k, s in flags.items()],
+            "recent_dose_spike_48h": recent_dose_spike(history, baseline),
+            "last_72h": _trends_72h(history),
+        }
+        result = _ask_json(json.dumps(payload), EXPLAIN_PROMPT, _check_explanation)
+    except Exception:
+        return None
+    # Safety net: red always ends with the flight surgeon, even if Gemini forgot.
+    if "red" in flags.values() and not any("flight surgeon" in a.lower() for a in result["actions"]):
+        result["actions"].append("Contact the flight surgeon.")
+    return result
 
 
 # ---------- daily check ----------
