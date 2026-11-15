@@ -869,8 +869,6 @@ def live_monitor():
             for e in events) or "No alerts yet this mission."
         st.markdown(f'<div class="panel"><h4>Alert log</h4>{log}</div>', unsafe_allow_html=True)
 
-        ai_panel(now_df, now_ts)
-
     st.caption(f"⚕️ {DISCLAIMER}")
 
 
