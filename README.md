@@ -26,6 +26,7 @@ Today, ISS crews draw and centrifuge their own blood, but samples are frozen and
 
 - **Rules raise the alarms.** `rules.py` compares each signal to the astronaut's own baseline and labels it green, yellow or red. Alarms work offline and never wait on the network.
 - **Gemini explains them.** The "Explain with Gemini" button sends the current reading, the last 72 hours and the flagged rules to Gemini, which returns a plain summary, the reason and 2–3 actions. Gemini also writes and scores the daily mood questions. It never changes the status colors.
+- **A personal check-in journal.** Each daily check-in (mood, memory recall, answers) is saved, the last 5 are shown with a "vs last time" comparison, and "Summarize my check-ins" asks Gemini to describe the trend.
 - **Mission control gets a copy.** Readings sync to a Cloudflare Worker and D1 database after a simulated Earth–Mars delay.
 - **The ground team is alerted.** When the status changes to red, the Worker sends a WhatsApp message through Twilio: at most one per 30 minutes, with no health numbers in the message.
 
