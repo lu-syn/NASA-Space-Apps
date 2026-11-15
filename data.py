@@ -7,6 +7,7 @@ the real dosimeter, heart-rate sensor, SERS blood panel and daily check.
 import json
 import os
 import sqlite3
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -220,21 +221,49 @@ def _to_sql_value(value):
     return value
 
 
+INSERT_SQL = (f"INSERT OR REPLACE INTO readings ({', '.join(COLUMNS)}) "
+              f"VALUES ({', '.join('?' for _ in COLUMNS)})")
+
+# Only one thread at a time may check-and-build the mission (Streamlit serves
+# several browser sessions from one process).
+_BUILD_LOCK = threading.Lock()
+
+
+def _row_values(row):
+    # Hook: dict reading -> list of SQLite values in COLUMNS order.
+    timestamp = pd.Timestamp(row["timestamp"])  # accept a string or Timestamp
+    return [_to_sql_value(timestamp)] + [_to_sql_value(row.get(col)) for col in COLUMNS[1:]]
+
+
 def save_reading(row: dict) -> None:
     # Hook: one reading in -> one row in mission.db (same timestamp = replace).
-    timestamp = pd.Timestamp(row["timestamp"])  # accept a string or Timestamp
-    values = [_to_sql_value(timestamp)]
-    values += [_to_sql_value(row.get(col)) for col in COLUMNS[1:]]
-    placeholders = ", ".join("?" for _ in COLUMNS)
-    sql = (f"INSERT OR REPLACE INTO readings ({', '.join(COLUMNS)}) "
-           f"VALUES ({placeholders})")
     with closing(_connect()) as conn:
         with conn:  # commits on success, rolls back on error
-            conn.execute(sql, values)
+            conn.execute(INSERT_SQL, _row_values(row))
+
+
+def _save_mission(df):
+    # Hook: whole mission -> mission.db in ONE transaction (fast cold start).
+    with closing(_connect()) as conn:
+        with conn:
+            conn.executemany(INSERT_SQL, [_row_values(r) for r in df.to_dict("records")])
+
+
+def _ensure_mission():
+    # Hook: if mission.db is missing or empty, build and save the mission.
+    # Streamlit Cloud starts with a fresh disk, so this happens on first run.
+    with _BUILD_LOCK:
+        with closing(_connect()) as conn:  # _connect also creates the tables
+            (count,) = conn.execute("SELECT COUNT(*) FROM readings").fetchone()
+        if count == 0:
+            _save_mission(generate_mission())
+            print(f"Built simulated mission in {DB_PATH.name}")
 
 
 def load_mission() -> pd.DataFrame:
     # Hook: everything in mission.db -> DataFrame, oldest reading first.
+    # Builds the mission first if the database is missing or empty.
+    _ensure_mission()
     with closing(_connect()) as conn:
         df = pd.read_sql_query(
             f"SELECT {', '.join(COLUMNS)} FROM readings ORDER BY timestamp", conn
@@ -405,6 +434,43 @@ def get_sync_status() -> dict:
     return {"synced": synced, "total": total, "last_sync": row[0] if row else None}
 
 
+# ---------------------------------------------------------------------------
+# App start-up (local and Streamlit Community Cloud).
+# Secrets come from environment variables. Locally, load_dotenv() copies .env
+# into the environment; on Streamlit Cloud, top-level entries in the app's
+# Secrets settings are already environment variables, and load_dotenv never
+# overwrites a variable that is already set.
+# ---------------------------------------------------------------------------
+
+_sync_started = False
+_sync_thread = None  # kept so tests (or a shutdown) can wait for it
+
+
+def _safe_sync():
+    # Hook: sync once in the background; any error is printed, never raised.
+    try:
+        sync_to_ground(0)
+    except Exception as err:  # noqa: BLE001 - a failed sync must not hurt the app
+        print(f"WARNING: background sync failed ({err}) - will retry next start.")
+
+
+def ensure_ready() -> None:
+    # Hook: data exists + ONE background sync per process. Safe on every rerun.
+    global _sync_started, _sync_thread
+    _ensure_mission()  # cheap COUNT(*) once the data is there
+    with _BUILD_LOCK:
+        if _sync_started:
+            return
+        _sync_started = True
+    load_dotenv()
+    if not (os.getenv("WORKER_URL") and os.getenv("SYNC_KEY")):
+        print("Ground sync off (WORKER_URL / SYNC_KEY not set).")
+        return
+    # Background thread: a full sync takes ~40 s; the dashboard shouldn't wait.
+    _sync_thread = threading.Thread(target=_safe_sync, name="sync_to_ground", daemon=True)
+    _sync_thread.start()
+
+
 if __name__ == "__main__":
     import sys
     if len(sys.argv) > 1 and sys.argv[1] == "sync":
@@ -414,8 +480,6 @@ if __name__ == "__main__":
         sync_to_ground(delay)
     else:
         # `python data.py` -> (re)build mission.db from the simulated mission.
-        mission = generate_mission()
-        for record in mission.to_dict("records"):
-            save_reading(record)
+        _save_mission(generate_mission())
         print(f"Saved simulated mission to {DB_PATH.name}\n")
         _print_summary(load_mission())
