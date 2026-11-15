@@ -191,11 +191,21 @@ CREATE TABLE IF NOT EXISTS readings (
 )
 """
 
+# Tiny key -> value table for sync bookkeeping (e.g. "last_sync" -> time).
+# Separate from readings so rebuilding the mission doesn't touch it.
+CREATE_SYNC_LOG_SQL = """
+CREATE TABLE IF NOT EXISTS sync_log (
+    key   TEXT PRIMARY KEY,
+    value TEXT
+)
+"""
+
 
 def _connect():
-    # Hook: open mission.db and make sure the table exists.
+    # Hook: open mission.db and make sure both tables exist.
     conn = sqlite3.connect(DB_PATH)
     conn.execute(CREATE_TABLE_SQL)
+    conn.execute(CREATE_SYNC_LOG_SQL)
     return conn
 
 
@@ -363,9 +373,36 @@ def sync_to_ground(delay_seconds=DEFAULT_SYNC_DELAY) -> int:
         _mark_synced(payload["timestamp"])  # only after Earth confirmed it
         sent += 1
 
+    if sent > 0:
+        _record_last_sync()  # at least one reading reached Earth
     left = len(_unsynced_timestamps())
     print(f"Synced {sent} readings to ground. Still waiting: {left}.")
     return sent
+
+
+def _record_last_sync():
+    # Hook: remember when Earth last confirmed a reading (local clock time).
+    # Real wall-clock time, not mission time: it answers "how fresh is the
+    # ground copy?" for the dashboard.
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    with closing(_connect()) as conn:
+        with conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO sync_log (key, value) VALUES ('last_sync', ?)",
+                (now,),
+            )
+
+
+def get_sync_status() -> dict:
+    # Hook: {"synced": n, "total": n, "last_sync": "YYYY-MM-DD HH:MM:SS" or None}.
+    with closing(_connect()) as conn:
+        synced, total = conn.execute(
+            "SELECT COALESCE(SUM(synced), 0), COUNT(*) FROM readings"
+        ).fetchone()
+        row = conn.execute(
+            "SELECT value FROM sync_log WHERE key = 'last_sync'"
+        ).fetchone()
+    return {"synced": synced, "total": total, "last_sync": row[0] if row else None}
 
 
 if __name__ == "__main__":

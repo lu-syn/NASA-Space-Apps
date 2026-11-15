@@ -5,6 +5,11 @@
 // Env (env.DB, env.SYNC_KEY) is generated into worker-configuration.d.ts by
 // `npm run types` from wrangler.jsonc and .dev.vars.
 
+import { type AlertEnv, sendAlert } from "./alert";
+
+// At most one WhatsApp alert per 30 minutes, however many red rows arrive.
+const ALERT_COOLDOWN_MS = 30 * 60 * 1000;
+
 // Shared row format (must match COLUMNS in data.py; never rename).
 const COLUMNS = [
   "timestamp", "dose_rate", "total_dose", "heart_rate",
@@ -67,7 +72,42 @@ async function saveReading(request: Request, env: Env): Promise<Response> {
     .bind(...DB_COLUMNS.map((col) => result[col]))
     .run();
 
-  return json({ ok: true, timestamp: result.timestamp }, 201);
+  // The reading is safely stored before we try any alert, so a Twilio
+  // problem can never lose data. `alert` tells the sender what happened.
+  const alert = await maybeAlert(env, result);
+  return json({ ok: true, timestamp: result.timestamp, alert }, 201);
+}
+
+async function maybeAlert(env: AlertEnv, row: Reading): Promise<string> {
+  // Hook: WhatsApp only on a NEW red (previous not red) and not within 30 min.
+  try {
+    if (row.status !== "red") return "not_red";
+
+    // The reading just before this one in mission time.
+    const previous = await env.DB.prepare(
+      "SELECT status FROM readings WHERE timestamp < ? ORDER BY timestamp DESC LIMIT 1",
+    ).bind(row.timestamp).first<{ status: string | null }>();
+    if (previous?.status === "red") return "previous_red"; // still the same red episode
+
+    // Cooldown uses real time, so a re-sync of old data can't spam the phone.
+    const last = await env.DB.prepare(
+      "SELECT value FROM alert_log WHERE key = 'last_alert_at'",
+    ).first<{ value: string }>();
+    if (last && Date.now() - Date.parse(last.value) < ALERT_COOLDOWN_MS) {
+      return "cooldown";
+    }
+
+    if (!(await sendAlert(env, row))) return "failed";
+    // Only a delivered alert starts the cooldown; a failed one can be retried.
+    await env.DB.prepare(
+      "INSERT OR REPLACE INTO alert_log (key, value) VALUES ('last_alert_at', ?)",
+    ).bind(new Date().toISOString()).run();
+    return "sent";
+  } catch (e) {
+    // e.g. alert_log table missing: log it, but the reading is already saved.
+    console.error(`alert check failed: ${e instanceof Error ? e.message : e}`);
+    return "error";
+  }
 }
 
 async function listReadings(env: Env): Promise<Response> {
