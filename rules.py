@@ -5,7 +5,7 @@ astronaut's own baseline (first 3 days). The overall status is the worst signal.
 """
 import pandas as pd
 
-MISSION_DOSE_BUDGET = 100.0   # same units as the total_dose column; agree on this with the data person
+MISSION_DOSE_BUDGET = 10.0   # same units as the total_dose column; agree on this with the data person
 BASELINE_DAYS = 3
 LEVELS = {"green": 0, "yellow": 1, "red": 2}
 
