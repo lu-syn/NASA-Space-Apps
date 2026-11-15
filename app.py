@@ -11,7 +11,7 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-from data import load_mission
+from data import get_sync_status, load_i4_reference, load_mission
 from rules import MISSION_DOSE_BUDGET, get_baseline, recent_dose_spike, signal_statuses, worst
 
 # ai.py talks to Gemini. If it can't be imported, the monitor still works:
@@ -55,7 +55,7 @@ PERIODIC_COLUMNS = ["crp", "cortisol", "glucose", "reaction_ms", "mood"]
 INDICATORS = {
     "dose_rate": {
         "name": "Radiation dose rate", "icon": "☢️", "column": "dose_rate", "unit": "µGy/h",
-        "fmt": "{:.0f}", "source": "Live · dosimeter",
+        "fmt": "{:.0f}", "source": "Simulated live feed · dosimeter",
         "info": {
             "what": "How much space radiation your body is absorbing right now.",
             "why": "Outside Earth's magnetic field, galactic cosmic rays and solar flares (solar "
@@ -73,7 +73,7 @@ INDICATORS = {
     },
     "mission_dose": {
         "name": "Mission dose total", "icon": "📈", "column": "total_dose", "unit": "mGy",
-        "fmt": "{:.2f}", "source": "Live · running total",
+        "fmt": "{:.2f}", "source": "Simulated live feed · running total",
         "info": {
             "what": "All the radiation you've absorbed since launch.",
             "why": "Long-term exposure raises lifetime cancer risk and may affect the heart and "
@@ -88,7 +88,7 @@ INDICATORS = {
     },
     "heart_rate": {
         "name": "Heart rate (resting)", "icon": "❤️", "column": "heart_rate", "unit": "bpm",
-        "fmt": "{:.0f}", "source": "Live · wearable",
+        "fmt": "{:.0f}", "source": "Simulated live feed · wearable",
         "info": {
             "what": "How fast your heart beats at rest.",
             "why": "Altered gravity shifts body fluids and deconditions the heart; stress, poor "
@@ -204,7 +204,7 @@ st.set_page_config(page_title="Astronaut Health Monitor", page_icon="🛰️", l
 # Styling for the custom tiles and banners (works best with the dark theme).
 st.markdown("""
 <style>
-.block-container {padding-top: 1.2rem;}
+.block-container {padding-top: 3.5rem;}
 .mbar {display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;
        background:#0d1726;border:1px solid #1f2d44;border-radius:10px;padding:10px 16px;
        color:#c9d6e8;font-size:14px;}
@@ -285,6 +285,44 @@ def find_dose_spikes(df, baseline_dose):
                "end": block["timestamp"].max() + pd.Timedelta(hours=1)}
               for _, block in df[high].groupby(group_id[high])]
     return pd.DataFrame(spikes, columns=["start", "end"])
+
+
+@st.cache_data
+def get_i4_reference():
+    # Hook: real Inspiration4 crew blood (NASA OSDR OSD-575), read once.
+    # Empty table if Lu's data/i4_blood.csv is missing; the app then skips it.
+    return load_i4_reference()
+
+
+def i4_crp_note():
+    # Hook: one line on the CRP tile about what the REAL crew showed right
+    # after landing (R+1), worked out from the file so it stays honest.
+    ref = get_i4_reference()
+    if ref.empty or "crp_fold_change" not in ref:
+        return ""
+    after = ref.loc[ref["timepoint"] == "R+1", "crp_fold_change"].dropna()
+    if after.empty:
+        return ""
+    return (f"Real Inspiration4 crew, day after landing: {after.min():.1f}–{after.max():.1f}× "
+            f"pre-flight CRP (NASA OSDR OSD-575)")
+
+
+def i4_crp_chart():
+    # Hook: REAL data chart: each crew member's CRP vs their own pre-flight
+    # value (1.0 = pre-flight), before and after the 3-day flight.
+    ref = get_i4_reference().dropna(subset=["crp_fold_change"])
+    flight = pd.DataFrame({"start": [0], "end": [3]})  # Inspiration4 flew 3 days
+    band = alt.Chart(flight).mark_rect(color="#58a6ff", opacity=0.15).encode(x="start:Q", x2="end:Q")
+    one = alt.Chart(pd.DataFrame({"y": [1.0]})).mark_rule(strokeDash=[4, 4], color="#8b9bb4").encode(y="y:Q")
+    lines = alt.Chart(ref).mark_line(point=True).encode(
+        x=alt.X("days_from_launch:Q", title="Days from launch (flight = shaded)"),
+        y=alt.Y("crp_fold_change:Q", title="CRP × pre-flight"),
+        color=alt.Color("crew_id:N", title="Crew member"),
+        tooltip=[alt.Tooltip("crew_id:N", title="Crew"), alt.Tooltip("timepoint:N", title="Timepoint"),
+                 alt.Tooltip("crp_fold_change:Q", title="× pre-flight")],
+    )
+    return (band + one + lines).properties(
+        title="REAL DATA · Inspiration4 crew CRP vs pre-flight (NASA OSDR OSD-575)", height=260)
 
 
 def latest(df, column):
@@ -443,18 +481,32 @@ def tile(key, status, now_df, baseline):
       <div class="val">{value} <span class="unit">{ind['unit']}</span></div>
       <div class="sub">{sub}</div>
       {sparkline(recent, color)}
+      {f'<div class="foot">🧬 {i4_crp_note()}</div>' if key == "crp" and i4_crp_note() else ""}
       <div class="foot">{footer}</div>
     </div>""", unsafe_allow_html=True)
+
+
+def sync_label():
+    # Hook: "Synced to mission control ✓ 168/168 · last sync 21:05" from Lu's
+    # get_sync_status(). Never breaks the header if the database can't be read.
+    try:
+        sync = get_sync_status()
+    except Exception:  # noqa: BLE001 - a status line must never crash the app
+        return "📡 Sync status unavailable"
+    if not sync["last_sync"]:
+        return "📡 Not synced yet"
+    return (f"📡 Synced to mission control ✓ {sync['synced']}/{sync['total']} "
+            f"· last sync {sync['last_sync']}")
 
 
 def mission_bar(now_ts):
     # Hook: the strip at the top: mission, crew, clock, LIVE light, ground link.
     day_label, met = mission_clock(now_ts)
-    state = '<span class="paused">❚❚ PAUSED</span>' if st.session_state.paused else '<span class="live">LIVE</span>'
+    state = '<span class="paused">❚❚ PAUSED</span>' if st.session_state.paused else '<span class="live">SIMULATED LIVE</span>'
     st.markdown(f"""
     <div class="mbar">
       <span>🛰️ <b>{MISSION_NAME}</b> &nbsp;|&nbsp; 👩‍🚀 {CREW_MEMBER} &nbsp;|&nbsp; Environment: spacecraft</span>
-      <span><b>{met}</b> &nbsp;({day_label}) &nbsp;&nbsp; {state}</span>
+      <span>{sync_label()} &nbsp;|&nbsp; <b>{met}</b> &nbsp;({day_label}) &nbsp;&nbsp; {state}</span>
     </div>""", unsafe_allow_html=True)
 
 
@@ -585,8 +637,19 @@ def ai_panel(now_df, now_ts):
 # Pages
 # ===========================================================================
 
-page = st.radio("Page", ["🖥️ Live monitor", "🧍 Body & guidance", "📝 Daily check-in"],
-                horizontal=True, label_visibility="collapsed")
+PAGES = ["🖥️ Live monitor", "🧍 Body & guidance", "📝 Daily check-in"]
+st.session_state.setdefault("page", PAGES[0])
+
+
+def go_to_page(name):
+    st.session_state.page = name
+
+
+# Page menu: three big buttons. The page you're on is filled in (primary).
+for column, name in zip(st.columns(len(PAGES)), PAGES):
+    column.button(name, on_click=go_to_page, args=(name,), width="stretch",
+                  type="primary" if st.session_state.page == name else "secondary")
+page = st.session_state.page
 
 
 @st.fragment(run_every=REFRESH_SECONDS)
@@ -623,6 +686,11 @@ def live_monitor():
                            width="stretch")
         with blood_tab:
             st.caption("🧪 SIMULATED SERS blood panel values (stand-in for the onboard sensor).")
+            if not get_i4_reference().empty:
+                st.altair_chart(i4_crp_chart(), width="stretch")
+                st.caption("🧬 REAL data from 4 Inspiration4 crew (3-day flight, Sept 2021): blood was drawn "
+                           "before and after flight, never during. 1.0 = that person's own pre-flight level "
+                           "(3 days before launch). Source: NASA OSDR OSD-575.")
             for col, (column, title, unit) in zip(st.columns(3), [
                     ("crp", "CRP (simulated)", "mg/L"),
                     ("cortisol", "Cortisol (simulated)", "µg/dL"),
