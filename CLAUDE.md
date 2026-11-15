@@ -56,6 +56,15 @@ cortisol µg/dL, glucose mg/dL, reaction_ms milliseconds, mood 1-5.
 6. `data.py`: `sync_to_ground(delay_seconds)` — queue unsent rows and POST them to the
    Worker after a simulated Earth-communication delay. Mark rows as synced in SQLite.
    Cloudflare failures must never crash the app; log and retry later.
+7. `worker/`: WhatsApp alert via the Twilio Sandbox. `src/alert.ts` `sendAlert(env, row)`
+   POSTs to Twilio's Messages API with fetch (basic auth TWILIO_ACCOUNT_SID /
+   TWILIO_AUTH_TOKEN, To=ALERT_TO, From=TWILIO_FROM, both `whatsapp:+...`); never throws,
+   returns true/false and logs Twilio's error code. Message has no health numbers:
+   "ASTRO ALERT (simulated): crew status RED. Open the mission dashboard for details."
+   After saving a POSTed row, send only when status is red AND the previous reading
+   was not red AND no alert was sent in the last 30 minutes (last alert time kept in a
+   small D1 table). Twilio secrets live only in Cloudflare (`wrangler secret put`);
+   never print them.
 
 ## Simulated mission scenario (demo values, not clinical data)
 - 7 days, one reading per hour (168 rows). Fixed random seed so the demo is repeatable.
