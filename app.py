@@ -753,6 +753,29 @@ def ai_panel(now_df, now_ts):
         st.markdown(f"- {action}")
 
 
+def explain_panel(now_df, now_ts, signals):
+    # Hook: on click, Gemini explains the CURRENT rule colors in plain words.
+    # Kept in session_state so the 2-second refresh doesn't wipe it.
+    if st.button("Explain with Gemini", key="explain_btn", width="stretch"):
+        flags = {k: s for k, s in signals.items() if s != "green"}
+        with st.spinner("Asking Gemini..."):
+            result = ai.explain_status(now_df.iloc[-1], flags, now_df) if ai else None
+        st.session_state.explanation = {"at": now_ts, "result": result}
+    saved = st.session_state.get("explanation")
+    if saved is None:
+        return
+    with st.container(border=True):
+        st.markdown(f"**Gemini explanation** · {mission_clock(saved['at'])[0]}")
+        result = saved["result"]
+        if result is None:
+            st.warning("Gemini unavailable; the rules above still apply.")
+            return
+        st.markdown(result["summary"])
+        st.caption(f"Why: {result['why']}")
+        for step in result["actions"]:
+            st.markdown(f"- {step}")
+
+
 # ===========================================================================
 # Pages
 # ===========================================================================
@@ -834,6 +857,7 @@ def live_monitor():
         items = "".join(f'<div class="ev" style="border-color:{STATUS_COLOR[s]}">{text}</div>'
                         for s, text in actions) or "No action needed. Keep your normal routine."
         st.markdown(f'<div class="panel"><h4>Do this now</h4>{items}</div>', unsafe_allow_html=True)
+        explain_panel(now_df, now_ts, signals)
 
         tasks = "".join(f"<div>{label}: {when.replace('**', '')}</div>" for label, when in upcoming_tasks(now_index))
         st.markdown(f'<div class="panel"><h4>Upcoming measurements</h4>{tasks}</div>', unsafe_allow_html=True)
